@@ -4,10 +4,11 @@ function joinPath(a, b) {
 }
 
 export function resolvePublicUrl(rel) {
-  // Строим путь относительно корня сайта, игнорируя hash и query
-  const relClean = rel.replace(/^\/+/, '');
+  // Строим путь с учётом BASE_URL (например, '/izzy-atcs/') и абсолютного origin
+  const relClean = String(rel || '').replace(/^\/+/, '');
+  const base = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/'); // гарантируем закрывающий '/'
   const origin = window.location.origin;
-  return origin + '/' + relClean;
+  return origin + base + relClean;
 }
 
 function normalizeCandidates(name) {
@@ -37,7 +38,7 @@ async function loadByCandidates(fileNames) {
   const tried = [];
   for (const baseName of fileNames) {
     for (const n of normalizeCandidates(baseName)) {
-      const href = resolvePublicUrl('resources/' + encodeURI(n));
+      const href = resolvePublicUrl('resources/' + encodeURIComponent(n));
       tried.push(href);
       try {
         const res = await fetch(href, { cache:'no-store' });
@@ -53,9 +54,23 @@ async function loadByCandidates(fileNames) {
 }
 
 // Обратная совместимость: старая сигнатура — одной строкой имя файла
+
+// src/lib/templates.js
 export async function loadBuiltinBuffer(fileName) {
-  return loadByCandidates([fileName]);
+  if (!fileName) {
+    throw new Error('Не выбран шаблон: имя пустое (undefined).');
+  }
+  // fileName без расширения или с ним — см. ниже
+  const name = fileName.endsWith('.docx') ? fileName : `${fileName}.docx`;
+  const url = resolvePublicUrl('resources/' + encodeURIComponent(name));
+
+  const res = await fetch(url, { cache: 'no-cache' });
+  if (!res.ok) {
+    throw new Error(`Не удалось загрузить шаблон: ${url} (HTTP ${res.status})`);
+  }
+  return await res.arrayBuffer();
 }
+
 
 // Рекомендуемый API: по id шаблона (перебирает оригинал+алиас, NFC/NFD)
 const RESOLVED_FILE_BY_ID = new Map(); // id -> href
@@ -76,9 +91,18 @@ export async function loadBuiltinBufferById(tplId) {
   // закэшируем первый существующий для ускорения последующих выборов):
   for (const baseName of tpl.files) {
     for (const n of normalizeCandidates(baseName)) {
-      const href = resolvePublicUrl('resources/' + encodeURI(n));
-      try { const r = await fetch(href, { cache:'no-store' }); if (r.ok) { RESOLVED_FILE_BY_ID.set(tplId, href); throw new Error('__STOP__'); } } catch(e){ if (String(e.message) === '__STOP__') break; }
+      const href = resolvePublicUrl('resources/' + encodeURIComponent(n));
+      try {
+        const r = await fetch(href, { cache:'no-store' });
+        if (r.ok) {
+          RESOLVED_FILE_BY_ID.set(tplId, href);
+          throw new Error('__STOP__');
+        }
+      } catch (e) {
+        if (String(e.message) === '__STOP__') break;
+      }
     }
   }
   return buf;
 }
+// ----------------- src/lib/templates.js (END) -----------------

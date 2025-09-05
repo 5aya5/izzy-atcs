@@ -14,5 +14,5 @@ dist/
 *.log
 .idea/
 .vscode/
-*.docx
-public/resources/*.docx
+# Разрешаем хранить DOCX-шаблоны в репозитории
+!public/resources/*.docx

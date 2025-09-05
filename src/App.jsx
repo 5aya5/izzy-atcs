@@ -2,16 +2,20 @@
 // Управляет состоянием формы, шаблонов, буфера шаблона и статусом
 import React, { useState, useEffect } from 'react'
 import TemplateGallery from './components/TemplateGallery'
-import FilePicker from './components/FilePicker'
 import Inspector from './components/Inspector'
 import StatusBar from './components/StatusBar'
 import Form from './components/Form'
-import { BUILTIN_TEMPLATES, loadBuiltinBuffer, loadBuiltinBufferById } from './lib/templates'
-import { extractTemplateKeys, buildPayload, GLOBAL_ALIASES, TEMPLATE_ALIASES } from './lib/placeholders'
+import { BUILTIN_TEMPLATES, loadBuiltinBufferById } from './lib/templates'
+import { extractTemplateKeys } from './lib/placeholders'
+import { makePayload, GLOBAL_ALIASES, TEMPLATE_ALIASES } from './lib/aliases'
 import { renderDocx } from './lib/docx'
 import { loadForm, saveForm, clearForm } from './lib/storage'
 import { makeFileName } from './lib/filename'
+import { getAllFields } from './schema/helpers'
+import { FORM_SECTIONS } from './schema/fields'
 import { saveAs } from 'file-saver'
+import { uzsToWords } from './lib/numwords-ru'
+import { validateForm } from './lib/validate'
 
 function App() {
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
@@ -22,15 +26,21 @@ function App() {
   const [formData, setFormData] = useState({});
   const [status, setStatus] = useState({ error: null, message: '' });
   const [inspectorKeys, setInspectorKeys] = useState([]);
+  const [errors, setErrors] = useState({});
+  const [autoWordsCache, setAutoWordsCache] = useState({});
 
   // Загрузка буфера встроенного шаблона при монтировании
   useEffect(() => {
     const loadBuffer = async () => {
       setIsLoadingTemplate(true);
       try {
-        const buffer = await loadBuiltinBuffer();
-        setBuffer(buffer);
-        setStatus({ error: null, message: 'Шаблон загружен' });
+        const firstId = BUILTIN_TEMPLATES[0]?.id;
+        if (firstId) {
+          const buf = await loadBuiltinBufferById(firstId);
+          setSelectedTemplateId(firstId);
+          setBuffer(buf);
+          setStatus({ error: null, message: 'Шаблон загружен' });
+        }
       } catch (e) {
         setStatus({ error: { name: 'Buffer', message: 'Ошибка загрузки шаблона' } });
       } finally {
@@ -39,6 +49,50 @@ function App() {
     };
     loadBuffer();
   }, []);
+
+  // Загрузка/сохранение формы
+  useEffect(() => {
+    const stored = loadForm();
+    if (stored && typeof stored === 'object') setFormData(stored);
+  }, []);
+  useEffect(() => {
+    saveForm(formData);
+    setErrors(validateForm(formData));
+  }, [formData]);
+
+  // Подсчёт прогресса заполнения обязательных полей
+  const getProgressText = () => {
+    const req = []
+    FORM_SECTIONS.forEach(s => s.fields.forEach(f => { if (f.required) req.push(f.name) }))
+    const filled = req.filter(n => (formData[n] || '').trim().length > 0)
+    return `Заполнено ${filled.length}/${req.length}`
+  }
+
+  // Обработчик изменений формы с автозаполнением сумм прописью
+  const handleFormChange = (next) => {
+    const sumFields = [
+      ['amount', 'amountWords'],
+      ['paymentAmount', 'paymentAmountWords'],
+      ['toolCost', 'toolCostWords'],
+      ['paymentByCustomer', 'paymentByCustomerWords'],
+    ]
+    const updated = { ...next }
+    const newCache = { ...autoWordsCache }
+    for (const [numKey, wordsKey] of sumFields) {
+      const raw = (updated[numKey] || '').replace(/\D+/g, '')
+      if (!raw) continue
+      const n = parseInt(raw, 10)
+      if (!Number.isFinite(n)) continue
+      const autoText = uzsToWords(n)
+      const currentWords = (updated[wordsKey] || '').trim()
+      if (!currentWords || currentWords === autoWordsCache[wordsKey]) {
+        updated[wordsKey] = autoText
+        newCache[wordsKey] = autoText
+      }
+    }
+    setAutoWordsCache(newCache)
+    setFormData(updated)
+  }
 
   // Выбор шаблона
   const selectTemplate = async id => {
@@ -57,17 +111,30 @@ function App() {
       } finally {
         setIsLoadingTemplate(false);
       }
+    } else if (template && template.src === 'uploaded' && template.file) {
+      setIsLoadingTemplate(true);
+      try {
+        const buf = await template.file.arrayBuffer();
+        setBuffer(buf);
+        setStatus({ error: null, message: 'Шаблон загружен' });
+      } catch (e) {
+        setStatus({ error: { name: 'Buffer', message: 'Ошибка загрузки файла шаблона' } });
+      } finally {
+        setIsLoadingTemplate(false);
+      }
     }
   };
 
   // Замена шаблона
-  const handleReplace = async id => {
+  const handleReplace = async (id, file) => {
     const template = templates.find(t => t.id === id);
-    if (!template) return;
+    if (!template || !file) return;
     setIsLoadingTemplate(true);
     try {
-      const buffer = await template.file.arrayBuffer();
-      setBuffer(buffer);
+      const buf = await file.arrayBuffer();
+      setBuffer(buf);
+      // Обновляем список шаблонов, помечая как загруженный файл
+      setTemplates(prev => prev.map(t => t.id === id ? { ...t, file, src: 'uploaded', title: file.name } : t));
       setSelectedTemplateId(id);
       setStatus({ error: null, message: 'Шаблон заменён' });
     } catch (e) {
@@ -79,15 +146,78 @@ function App() {
   // Добавление нового шаблона
   const handleAdd = async file => {
     const id = 'custom_' + Date.now()
-    setTemplates([...templates, { id, title: file.name, file, src: 'uploaded' }])
+    setTemplates(prev => [...prev, { id, title: file.name, file, src: 'uploaded' }])
     setSelectedTemplateId(id)
-    setStatus({ error: null, message: 'Шаблон добавлен' })
+    try {
+      const buf = await file.arrayBuffer()
+      setBuffer(buf)
+      setStatus({ error: null, message: 'Шаблон добавлен и загружен' })
+    } catch (e) {
+      setStatus({ error: { name: 'Buffer', message: 'Ошибка чтения файла шаблона' } })
+    }
   }
+
+  // Применить пресет значений по выбранному шаблону
+  const handleApplyPreset = () => {
+    const preset = {
+      chargers: { typeServices: 'Чарджинг' },
+      drivers: { typeServices: 'Доставка' },
+      fines: { typeServices: 'Услуги со штрафом' },
+      deposit: { typeServices: 'Услуги с удержанием депозита' },
+    }[selectedTemplateId] || {}
+    if (Object.keys(preset).length) {
+      handleFormChange({ ...formData, ...preset })
+      setStatus({ error: null, message: 'Пресет применён' })
+    } else {
+      setStatus({ error: null, message: 'Для текущего шаблона пресета нет' })
+    }
+  }
+
+  // Использовать последние сохранённые значения
+  const handleFillLast = () => {
+    const last = loadForm()
+    if (last && typeof last === 'object') {
+      handleFormChange(last)
+      setStatus({ error: null, message: 'Данные загружены из черновика' })
+    }
+  }
+
+  // Разбор одной строки (паспорт, дата, карта, ПИНФЛ)
+  const handleQuickParse = (line) => {
+    const next = { ...formData }
+    const s = String(line || '')
+    const passport = s.match(/[A-ZА-Я]{2}\s?\d{7}/i)
+    if (passport) next.passport = passport[0].replace(/\s+/g, '')
+    const date = s.match(/\b(\d{2})[.\/-](\d{2})[.\/-](\d{4})\b/)
+    if (date) { next.issDay = date[1]; next.issMonth = date[2]; next.issYear = date[3] }
+    const card = s.match(/\b(\d{4})[\s-]?(\d{4})[\s-]?(\d{4})[\s-]?(\d{4})\b/)
+    if (card) next.bankCard = `${card[1]} ${card[2]} ${card[3]} ${card[4]}`
+    const pinfl = s.match(/\b\d{14}\b/)
+    if (pinfl) next.pinfl = pinfl[0]
+    handleFormChange(next)
+    setStatus({ error: null, message: 'Строка разобрана и применена' })
+  }
+
+  // Горячие клавиши
+  useEffect(() => {
+    const onKey = (e) => {
+      const mod = e.ctrlKey || e.metaKey
+      if (!mod) return
+      const k = e.key.toLowerCase()
+      if (k === 's') { e.preventDefault(); handleExport(); }
+      if (k === 'g') { e.preventDefault(); handleSubmit(); }
+      if (k === 'i') { e.preventDefault(); handleInspect(); }
+      if (k === 'l') { e.preventDefault(); handleFillLast(); }
+      if (k === 'k') { e.preventDefault(); handleSelfCheck(); }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [formData, buffer, selectedTemplateId])
   // Проверка плейсхолдеров
   const handleInspect = async () => {
-    if (!templateBuffer) return setStatus({ error: { name: 'Buffer', message: 'Шаблон не загружен' } })
+    if (!buffer) return setStatus({ error: { name: 'Buffer', message: 'Шаблон не загружен' } })
     try {
-      const { keys } = await extractTemplateKeys(templateBuffer)
+      const { keys } = await extractTemplateKeys(buffer)
       setInspectorKeys(keys)
       setStatus({ error: null, message: 'Плейсхолдеры извлечены' })
     } catch (e) {
@@ -96,10 +226,10 @@ function App() {
   }
   // Генерация DOCX
   const handleSubmit = async () => {
-    if (!templateBuffer) return setStatus({ error: { name: 'Buffer', message: 'Нет активного шаблона' } })
+    if (!buffer) return setStatus({ error: { name: 'Buffer', message: 'Нет активного шаблона' } })
     try {
-      const payload = buildPayload(formData, selectedTemplateId)
-      const blob = await renderDocx(templateBuffer, payload)
+      const payload = makePayload(formData, selectedTemplateId)
+      const blob = await renderDocx(buffer, payload)
       saveAs(blob, makeFileName(formData))
       setStatus({ error: null, message: 'Документ успешно создан' })
     } catch (e) {
@@ -109,6 +239,7 @@ function App() {
   // Сброс формы
   const handleClear = () => {
     clearForm()
+    setAutoWordsCache({})
     setFormData({})
     setStatus({ error: null, message: 'Форма сброшена' })
   }
@@ -121,7 +252,7 @@ function App() {
   }
   // Импорт JSON
   const handleImport = data => {
-    setFormData(data)
+    handleFormChange(data)
     setStatus({ error: null, message: 'Форма импортирована' })
   }
 
@@ -187,7 +318,10 @@ function App() {
       <div className="container">
         <div className="toolbar">
           <h1 className="page-title">Генератор акта</h1>
-          <button className="btn btn-ghost btn-sm" onClick={handleSelfCheck}>Быстрая проверка</button>
+          <div style={{display:'flex',alignItems:'center',gap:'10px'}}>
+            <small className="muted">{getProgressText()}</small>
+            <button className="btn btn-ghost btn-sm" onClick={handleSelfCheck}>Быстрая проверка</button>
+          </div>
         </div>
 
         <section className="section">
@@ -200,6 +334,7 @@ function App() {
               onSelect={selectTemplate}
               onReplace={handleReplace}
               onAdd={handleAdd}
+              onInspect={handleInspect}
               bufferLoaded={!!buffer}
             />
           </div>
@@ -207,15 +342,14 @@ function App() {
 
         <div className="content-narrow">
           <section className="section">
-            {/* HowToFill: инструкция по заполнению, можно вынести в отдельный компонент */}
+            {/* HowToFill: инструкция по заполнению */}
             <div className="form-help">
               <strong>Как заполнить поля:</strong>
               <ul>
-                <li>Даты — только цифрами, формат ДД.ММ.ГГГГ или по инструкции.</li>
+                <li>Даты — только цифрами, формат ДД.ММ.ГГГГ.</li>
                 <li>Суммы — цифрами и отдельно прописью.</li>
                 <li>ФИО — полностью, как в паспорте.</li>
                 <li>Паспорт — серия и номер как в документе.</li>
-                <li>Сумма прописью должна соответствовать цифрам.</li>
                 <li>Проверьте банк, карту и ПИНФЛ.</li>
                 <li>Дополнительные поля — только если требует шаблон.</li>
               </ul>
@@ -224,15 +358,29 @@ function App() {
           <section className="section">
             <Form
               value={formData}
-              onChange={setFormData}
+              onChange={handleFormChange}
               onSubmit={handleSubmit}
               onInspect={handleInspect}
               onClear={handleClear}
               onExport={handleExport}
               onImport={handleImport}
-              errors={{}}
+              onFillLast={handleFillLast}
+              onApplyPreset={handleApplyPreset}
+              onQuickParse={handleQuickParse}
+              errors={errors}
+              progressText={getProgressText()}
             />
           </section>
+          {inspectorKeys.length > 0 && (
+            <section className="section">
+              <h2 className="center-text">Инспектор плейсхолдеров</h2>
+              <Inspector
+                keys={inspectorKeys}
+                formKeys={getAllFields()}
+                aliases={{ ...GLOBAL_ALIASES, ...(TEMPLATE_ALIASES[selectedTemplateId] || {}) }}
+              />
+            </section>
+          )}
         </div>
 
         <StatusBar error={status.error} message={status.message} />

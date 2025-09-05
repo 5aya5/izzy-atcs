@@ -18,7 +18,10 @@ export default function Inspector({ keys = [], formKeys = [], aliases = {} }) {
   // Примечание для non-standard
   const getNote = key => key.includes(' ') ? 'non-standard (поддерживается через алиас или прямую подстановку)' : ''
   // Цветная метка статуса
-  const getBadge = status => <span className={`badge ${status}`}>{status}</span>
+  const getBadge = status => {
+    const cls = status === 'non-standard' ? 'nonstd' : status
+    return <span className={`badge badge--${cls}`}>{status}</span>
+  }
 
   if (!keys.length) {
     return <div className="hint">Шаблон не выбран или не загружен. Выберите шаблон и нажмите «Проверить плейсхолдеры».</div>

@@ -4,10 +4,13 @@ function joinPath(a, b) {
 }
 
 export function resolvePublicUrl(rel) {
-  // Строим путь относительно корня сайта, игнорируя hash и query
+  // Строим абсолютный URL с учётом базового префикса Vite (например, GitHub Pages)
+  // new URL требует абсолютную базу, поэтому комбинируем origin + BASE_URL
   const relClean = rel.replace(/^\/+/, '');
-  const origin = window.location.origin;
-  return origin + '/' + relClean;
+  const base = (import.meta.env && import.meta.env.BASE_URL) ? import.meta.env.BASE_URL : '/';
+  const absBase = new URL(base, window.location.origin);
+  const url = new URL(relClean, absBase);
+  return url.toString();
 }
 
 function normalizeCandidates(name) {

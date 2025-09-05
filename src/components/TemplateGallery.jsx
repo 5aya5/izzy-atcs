@@ -10,7 +10,7 @@ import React from 'react'
  * - onReplace(id, file): заменить шаблон
  * - onAdd(file): добавить новый шаблон
  */
-export default function TemplateGallery({ templates, selectedId, onSelect, onReplace, onAdd, bufferLoaded }) {
+export default function TemplateGallery({ templates, selectedId, onSelect, onReplace, onAdd, onInspect, bufferLoaded }) {
   // ...existing code...
   // Обработка замены шаблона
   const handleReplace = (id, e) => {
@@ -24,7 +24,6 @@ export default function TemplateGallery({ templates, selectedId, onSelect, onRep
   }
   return (
     <div className="template-gallery tpl-grid-wrap">
-      <h2 className="center-text">Шаблоны актов</h2>
       <div className="template-desc center-text">
         Выберите шаблон для генерации акта.<br />
         <b>Редактировать шаблон</b> — заменить файл на свой .docx.<br />
@@ -38,12 +37,19 @@ export default function TemplateGallery({ templates, selectedId, onSelect, onRep
           <div key={t.id} className={`tpl-card card${selectedId === t.id ? ' is-active' : ''}`}> 
             <div className="card__body">
               <div className="tpl-title">{t.title}</div>
-              <div className="tpl-note">{t.note || t.title}</div>
+              {(() => {
+                const title = String(t.title || '').trim().toLowerCase()
+                const note = String(t.note || '').trim()
+                const noteLc = note.toLowerCase()
+                return note && noteLc !== title ? (
+                  <div className="tpl-note">{note}</div>
+                ) : null
+              })()}
               <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', justifyContent: 'center' }}>
                 <button className={`btn btn-primary btn-sm${selectedId === t.id ? ' is-active' : ''}`} onClick={() => onSelect(t.id)}>
                   {selectedId === t.id ? 'Выбран' : 'Выбрать'}
                 </button>
-                <button className="btn btn-outline btn-sm" disabled={!bufferLoaded}>
+                <button className="btn btn-outline btn-sm" disabled={!bufferLoaded} onClick={() => onInspect && onInspect()}>
                   Проверить плейсхолдеры
                 </button>
                 <label className="btn btn-ghost btn-sm">
